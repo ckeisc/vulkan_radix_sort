@@ -1,129 +1,96 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.15)
 
-project(vk_radix_sort VERSION 0.6.0 LANGUAGES CXX)
+project(vk_radix_sort LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 find_package(Vulkan REQUIRED)
-message(STATUS "Vulkan version: ${Vulkan_VERSION}")
-find_package(Python3 REQUIRED)
-include(FetchContent)
 
-option(VRDX_SLANGC_FROM_SDK "Use slangc from the Vulkan SDK instead of downloading a pinned release" OFF)
-include(cmake/Slangc.cmake)
-fetch_slangc("2026.11")
+# adds -fPIC, works for linux, when building shared library
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # shaders
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/generated)
 
-# header-only library
-add_library(vk_radix_sort INTERFACE)
+# add_shader(TARGET SHADER OUTPUT DEFINE...)
+function(add_shader)
+  list(POP_FRONT ARGV TARGET SHADER OUTPUT)
+  list(TRANSFORM ARGV PREPEND "-D" OUTPUT_VARIABLE DEFINES)
 
-target_include_directories(vk_radix_sort INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+  get_filename_component(SHADER ${SHADER} ABSOLUTE)
+
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/generated/${OUTPUT}.h
+    COMMAND
+      ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}
+      --target-env spirv1.5
+      -V
+      --vn ${OUTPUT}
+      -o ${CMAKE_CURRENT_SOURCE_DIR}/src/generated/${OUTPUT}.h
+      ${DEFINES}
+      ${SHADER}
+    DEPENDS ${SHADER}
+    COMMENT "Compiling ${CMAKE_CURRENT_SOURCE_DIR}/src/generated/${OUTPUT}.h"
+  )
+
+  add_custom_target(${OUTPUT} DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/generated/${OUTPUT}.h)
+  add_dependencies(${TARGET} ${OUTPUT})
+endfunction()
+
+# library
+add_library(vk_radix_sort STATIC
+  src/vk_radix_sort.cc
 )
 
-build_shader(src/shader/upsweep.slang upsweep_slang)
-build_shader(src/shader/spine.slang spine_slang)
-build_shader(src/shader/downsweep.slang downsweep_slang)
-build_shader(src/shader/downsweep.slang downsweep_key_value_slang KEY_VALUE)
-
-add_custom_target(vk_radix_sort_header ALL
-  COMMAND
-    ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_header.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vk_radix_sort.h.in
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/vk_radix_sort.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/generated
-    ${PROJECT_VERSION_MAJOR} ${PROJECT_VERSION_MINOR} ${PROJECT_VERSION_PATCH}
-  DEPENDS
-    upsweep_slang
-    spine_slang
-    downsweep_slang
-    downsweep_key_value_slang
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vk_radix_sort.h.in
-  COMMENT "Generating include/vk_radix_sort.h from template"
-  VERBATIM
+target_include_directories(vk_radix_sort
+  PUBLIC include
+  PRIVATE src
 )
 
-add_dependencies(vk_radix_sort vk_radix_sort_header)
+target_link_libraries(vk_radix_sort
+  PUBLIC Vulkan::Vulkan
+)
+
+add_shader(vk_radix_sort src/shader/upsweep.comp upsweep_comp)
+add_shader(vk_radix_sort src/shader/spine.comp spine_comp)
+add_shader(vk_radix_sort src/shader/downsweep.comp downsweep_comp)
+add_shader(vk_radix_sort src/shader/downsweep.comp downsweep_key_value_comp KEY_VALUE)
 
 # bench
-if(PROJECT_IS_TOP_LEVEL)
-  FetchContent_Declare(
-    volk
-    GIT_REPOSITORY https://github.com/zeux/volk.git
-    GIT_TAG        f30088b3f4160810b53e19258dd2f7395e5f0ba3  # vulkan-sdk-1.4.328.1
-  )
-
-  FetchContent_Declare(
-    VulkanMemoryAllocator
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-    GIT_TAG        1d8f600fd424278486eade7ed3e877c99f0846b1  # v3.3.0
-  )
-  FetchContent_MakeAvailable(volk VulkanMemoryAllocator)
-
-  FetchContent_Declare(
-    fuchsia_radix_sort
-    GIT_REPOSITORY https://github.com/jaesung-cs/fuchsia_radix_sort.git
-    GIT_TAG        4a0425cf72d59b891936bb7f4c96e2d577abd63e
-  )
-  set(FUCHSIA_RADIX_SORT_USE_VOLK ON CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(fuchsia_radix_sort)
-
-  FetchContent_Declare(
-    cxxopts
-    GIT_REPOSITORY https://github.com/jarro2783/cxxopts.git
-    GIT_TAG        44380e5a44706ab7347f400698c703eb2a196202  # v3.3.1
-  )
-  FetchContent_MakeAvailable(cxxopts)
-
+if (PROJECT_IS_TOP_LEVEL)
   set(BENCH_SOURCES
     bench/bench.cc
     bench/benchmark_factory.cc
     bench/cpu_benchmark.cc
     bench/data_generator.cc
-    bench/fuchsia_benchmark.cc
     bench/vma_impl.cc
-    bench/volk_impl.cc
-    bench/vrdx_impl.cc
     bench/vulkan_benchmark.cc
   )
 
-  #if CUDA is available, add CUB benchmark
+  # if CUDA is available, add CUB benchmark
   include(CheckLanguage)
   check_language(CUDA)
-  if(CMAKE_CUDA_COMPILER)
+  if (CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_STANDARD_REQUIRED True)
     list(APPEND BENCH_SOURCES
       bench/cuda_benchmark.cu
     )
   endif()
 
+  message(${BENCH_SOURCES})
   add_executable(bench ${BENCH_SOURCES})
 
-  set_target_properties(bench PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-  )
-
-  if(CMAKE_CUDA_COMPILER)
-    set_target_properties(bench PROPERTIES CUDA_ARCHITECTURES native)
-    if(MSVC)
-      target_compile_options(bench PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor /utf-8>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor -Xcompiler=/utf-8>
-      )
-      target_link_options(bench PRIVATE
-        $<$<CONFIG:Debug>:/NODEFAULTLIB:LIBCMTD>
-        $<$<NOT:$<CONFIG:Debug>>:/NODEFAULTLIB:LIBCMT>
-      )
-    endif()
+  if (CMAKE_CUDA_COMPILER)
     target_compile_definitions(bench PUBLIC BENCH_CUDA)
   endif()
 
-  target_compile_definitions(bench PRIVATE VK_NO_PROTOTYPES)
+  # if VMA is already added from parent project, skip
+  if (NOT TARGET VulkanMemoryAllocator)
+    add_subdirectory(third_party/VulkanMemoryAllocator EXCLUDE_FROM_ALL)
+  endif()
 
-  target_link_libraries(bench PRIVATE vk_radix_sort volk::volk_headers VulkanMemoryAllocator fuchsia_radix_sort cxxopts::cxxopts)
+  target_link_libraries(bench PRIVATE vk_radix_sort VulkanMemoryAllocator)
 endif()
